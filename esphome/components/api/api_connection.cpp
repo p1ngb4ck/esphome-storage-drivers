@@ -31,6 +31,10 @@
 #include "esphome/core/log.h"
 #include "esphome/core/progmem.h"
 #include "esphome/core/version.h"
+
+#ifdef USE_STORE_YAML
+#include "store_yaml_size.h"
+#endif
 #ifdef USE_PROVISIONING
 #include "esphome/components/provisioning/provisioning.h"
 #endif
