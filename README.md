@@ -130,7 +130,7 @@ Each `pr/` branch holds one part of this topic on top of upstream and says in it
 | `pr/ftp` | `pr/cert-store` of p1ngb4ck/esphome-cert-store, `pr/storage-write-done` of p1ngb4ck/esphome-storage-interface |
 | `pr/ftp-client` | `pr/cert-store` of p1ngb4ck/esphome-cert-store |
 | `pr/nfs-client` | `pr/storage` of p1ngb4ck/esphome-storage-interface |
-| `pr/nvs` | `pr/binary-storage`, `pr/esp32-nvs-actions`, `pr/esp32-nvs-ready` |
+| `pr/nvs` | `pr/esp32-nvs-actions`, `pr/preferences-storage` |
 | `pr/preferences-storage` | `pr/binary-storage`, `pr/esp32-nvs-ready` |
 | `pr/s3-client` | `pr/cert-store` of p1ngb4ck/esphome-cert-store |
 | `pr/sd-storage` | `pr/storage` of p1ngb4ck/esphome-storage-interface |
