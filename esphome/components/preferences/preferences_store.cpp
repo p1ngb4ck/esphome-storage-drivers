@@ -3,12 +3,11 @@
 #if defined(USE_ESP32) && (defined(USE_PREFERENCES_BACKUP) || defined(USE_ESP32_PREFERENCES_STORAGE))
 
 #include "esphome/components/storage/storage.h"
-#if defined(USE_PREFERENCES_BACKUP) || defined(USE_ESP32_PREFERENCES_STORAGE)
+#ifdef USE_PREFERENCES_BACKUP
 #include "esphome/components/binary_storage/nvs_store.h"
 #endif
 #ifdef USE_ESP32_PREFERENCES_STORAGE
 #include "esphome/components/esp32/preferences.h"
-#include <nvs.h>
 #endif
 
 namespace esphome::preferences {
@@ -45,24 +44,6 @@ storage::KeyValueStorage *get_backup_store() {
   return s_external;
 #endif
 }
-
-#ifdef USE_ESP32_PREFERENCES_STORAGE
-int open_namespace(const char *ns, bool write, uint32_t *handle) {
-  const nvs_open_mode_t mode = write ? NVS_READWRITE : NVS_READONLY;
-  auto *external = static_cast<binary_storage::NVSStore *>(s_external);
-  if (external != nullptr && external->is_initialized() && external->get_partition_label() != nullptr)
-    return nvs_open_from_partition(external->get_partition_label(), ns, mode, handle);
-  return nvs_open(ns, mode, handle);
-}
-
-storage::KeyValueStorage *settings_store() {
-  auto *external = static_cast<binary_storage::NVSStore *>(s_external);
-  if (external != nullptr && external->is_initialized() && external->get_partition_label() != nullptr)
-    return external;
-  static binary_storage::NVSStore s_default;
-  return &s_default;
-}
-#endif
 
 }  // namespace esphome::preferences
 
