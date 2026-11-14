@@ -6,6 +6,5 @@ Change of this branch: `nvs`: the NVS guard - what wrote the NVS (meta record), 
 
 Based on these branches, whose changes it holds and builds on:
 
-- `pr/binary-storage`: `binary_storage`: EEPROM, FRAM, MRAM and SPI flash on I2C / SPI / 1-Wire as raw or file system storages, flash partitions, LittleFS regions, NVS regions, pre-fill
 - `pr/esp32-nvs-actions`: NVS browsing and erasing, API actions `nvs_list` / `nvs_erase`
-- `pr/esp32-nvs-ready`: `nvs_ready`: the default NVS partition formatted when it reports no free pages or a new version
+- `pr/preferences-storage`: `preferences`: flash preferences through the storage interface or an external NVS region, optional internal NVS, `keep_early`, backup / restore
