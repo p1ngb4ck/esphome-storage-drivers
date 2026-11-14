@@ -985,13 +985,9 @@ static bool decode_entity_value(const char *s, size_t len, const RuntimeEntry &r
       if (!r.i("swing_mode", li))
         return false;
       st.swing_mode = static_cast<climate::ClimateSwingMode>(li);
-      float low, high, humidity;
-      if (!r.f("target_temperature_low", low) || !r.f("target_temperature_high", high) ||
-          !r.f("target_humidity", humidity))
+      if (!r.f("target_temperature_low", st.target_temperature_low) ||
+          !r.f("target_temperature_high", st.target_temperature_high) || !r.f("target_humidity", st.target_humidity))
         return false;
-      st.target_temperature_low = low;
-      st.target_temperature_high = high;
-      st.target_humidity = humidity;
       memcpy(blob, &st, sizeof(st));
       *blob_len = sizeof(st);
       return true;

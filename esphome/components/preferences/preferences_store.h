@@ -22,11 +22,6 @@ void set_external_store(storage::KeyValueStorage *kv);
 // internal namespace cannot be opened.
 storage::KeyValueStorage *get_backup_store();
 
-#ifdef USE_ESP32_PREFERENCES_STORAGE
-int open_namespace(const char *ns, bool write, uint32_t *handle);
-storage::KeyValueStorage *settings_store();
-#endif
-
 }  // namespace esphome::preferences
 
 #endif
