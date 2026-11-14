@@ -115,3 +115,24 @@ core of the build host stays as installed.
 Thank you, Mallow ([youkorr](https://github.com/youkorr)) - your SD card component for ESPHome was where
 `sd_storage` started. Everyone this project builds on:
 [ATTRIBUTIONS.md](https://github.com/p1ngb4ck/esphome/blob/dev/ATTRIBUTIONS.md).
+
+## Branch structure
+
+Each `pr/` branch holds one part of this topic on top of upstream and says in its `BRANCH.md` what it is based on. `main` holds all of them.
+
+| Branch | Based on |
+|---|---|
+| `pr/binary-storage` | `pr/spi-nvs-pins`, `pr/storage` of p1ngb4ck/esphome-storage-interface |
+| `pr/esp32-nvs-actions` | `pr/esp32-chip-revision` of p1ngb4ck/esphome-esp32-platform |
+| `pr/esp32-nvs-defaults` | upstream only |
+| `pr/esp32-nvs-ready` | upstream only |
+| `pr/firmware-update` | `pr/storage` of p1ngb4ck/esphome-storage-interface |
+| `pr/ftp` | `pr/cert-store` of p1ngb4ck/esphome-cert-store, `pr/storage-write-done` of p1ngb4ck/esphome-storage-interface |
+| `pr/ftp-client` | `pr/cert-store` of p1ngb4ck/esphome-cert-store |
+| `pr/nfs-client` | `pr/storage` of p1ngb4ck/esphome-storage-interface |
+| `pr/nvs` | `pr/binary-storage`, `pr/esp32-nvs-actions`, `pr/esp32-nvs-ready` |
+| `pr/preferences-storage` | `pr/binary-storage`, `pr/esp32-nvs-ready` |
+| `pr/s3-client` | `pr/cert-store` of p1ngb4ck/esphome-cert-store |
+| `pr/sd-storage` | `pr/storage` of p1ngb4ck/esphome-storage-interface |
+| `pr/spi-nvs-pins` | upstream only |
+| `pr/store-yaml` | `pr/storage` of p1ngb4ck/esphome-storage-interface |
