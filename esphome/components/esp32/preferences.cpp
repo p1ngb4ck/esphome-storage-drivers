@@ -29,32 +29,22 @@ static binary_storage::NVSStore s_pref_store;
 
 #ifdef USE_ESP32_PREFERENCES_STORAGE
 static storage::KeyValueStorage *s_kv = nullptr;
-static storage::KeyValueStorage *s_external = nullptr;
-
-static storage::KeyValueStorage *current_kv() {
-  return s_external != nullptr && s_external->is_initialized() ? s_external : s_kv;
-}
-
-static storage::KeyValueStorage *kv_of(storage::KeyValueStorage *kv) { return kv != nullptr ? kv : current_kv(); }
 
 // True iff a value of exactly len bytes exists for key; fills data on success.
-static bool pref_kv_read(storage::KeyValueStorage *kv, uint32_t key, uint8_t *data, size_t len) {
+static bool pref_kv_read(uint32_t key, uint8_t *data, size_t len) {
   size_t stored = 0;
-  if (kv == nullptr || kv->get_size(key, &stored) != storage::StorageError::STORAGE_ERROR_OK)
+  if (s_kv == nullptr || s_kv->get_size(key, &stored) != storage::StorageError::STORAGE_ERROR_OK)
     return false;
   if (stored != len)
     return false;
   size_t got = 0;
-  return kv->get(key, data, len, &got) == storage::StorageError::STORAGE_ERROR_OK && got == len;
+  return s_kv->get(key, data, len, &got) == storage::StorageError::STORAGE_ERROR_OK && got == len;
 }
 #endif
 
 struct NVSData {
   uint32_t key;
   SmallInlineBuffer<8> data;  // Most prefs fit in 8 bytes (covers fan, cover, select, etc.)
-#ifdef USE_ESP32_PREFERENCES_STORAGE
-  storage::KeyValueStorage *kv{nullptr};
-#endif
 };
 
 static std::vector<NVSData> s_pending_save;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
@@ -122,9 +112,6 @@ bool ESP32PreferenceBackend::save(const uint8_t *data, size_t len) {
   NVSData save{};
   save.key = this->key;
   save.data.set(data, len);
-#ifdef USE_ESP32_PREFERENCES_STORAGE
-  save.kv = this->kv;
-#endif
   s_pending_save.push_back(std::move(save));
   ESP_LOGVV(TAG, "s_pending_save: key: %" PRIu32 ", len: %zu", this->key, len);
   return true;
@@ -151,8 +138,8 @@ bool ESP32PreferenceBackend::load(uint8_t *data, size_t len) {
   uint32_to_str(key_str, this->key);
   size_t actual_len;
 #ifdef USE_ESP32_PREFERENCES_STORAGE
-  if (kv_of(this->kv) != nullptr)
-    return pref_kv_read(kv_of(this->kv), this->key, data, len);
+  if (s_kv != nullptr)
+    return pref_kv_read(this->key, data, len);
 #endif
   esp_err_t err = nvs_get_blob(this->nvs_handle, key_str, nullptr, &actual_len);
   if (err != 0) {
@@ -278,9 +265,6 @@ ESP32PreferenceBackend ESP32Preferences::make_backend_(uint32_t type) const {
   ESP32PreferenceBackend backend;
   backend.nvs_handle = this->nvs_handle;
   backend.key = type;
-#ifdef USE_ESP32_PREFERENCES_STORAGE
-  backend.kv = registration_hook != nullptr || s_kv == nullptr ? current_kv() : s_kv;
-#endif
   return backend;
 }
 
@@ -334,9 +318,8 @@ bool ESP32Preferences::sync() {
     if (this->is_changed_(this->nvs_handle, save, key_str)) {
       esp_err_t err;
 #ifdef USE_ESP32_PREFERENCES_STORAGE
-      if (kv_of(save.kv) != nullptr)
-        err = kv_of(save.kv)->set(save.key, save.data.data(), save.data.size()) ==
-                      storage::StorageError::STORAGE_ERROR_OK
+      if (s_kv != nullptr)
+        err = s_kv->set(save.key, save.data.data(), save.data.size()) == storage::StorageError::STORAGE_ERROR_OK
                   ? ESP_OK
                   : ESP_FAIL;
       else
@@ -369,8 +352,7 @@ bool ESP32Preferences::sync() {
              failed);
   }
 
-  if (this->nvs_handle == 0)
-    return failed == 0;
+  // note: commit on esp-idf currently is a no-op, nvs_set_blob always writes
   esp_err_t err = nvs_commit(this->nvs_handle);
   if (err != 0) {
     ESP_LOGV(TAG, "nvs_commit() failed: %s", esp_err_to_name(err));
@@ -383,15 +365,14 @@ bool ESP32Preferences::sync() {
 bool ESP32Preferences::is_changed_(uint32_t nvs_handle, const NVSData &to_save, const char *key_str) {
   size_t actual_len;
 #ifdef USE_ESP32_PREFERENCES_STORAGE
-  storage::KeyValueStorage *kv = kv_of(to_save.kv);
-  if (kv != nullptr) {
-    if (kv->get_size(to_save.key, &actual_len) != storage::StorageError::STORAGE_ERROR_OK)
+  if (s_kv != nullptr) {
+    if (s_kv->get_size(to_save.key, &actual_len) != storage::StorageError::STORAGE_ERROR_OK)
       return true;  // not set yet -> changed
     if (actual_len != to_save.data.size())
       return true;
     SmallBufferWithHeapFallback<256> stored_data(actual_len);
     size_t got = 0;
-    if (kv->get(to_save.key, stored_data.get(), actual_len, &got) != storage::StorageError::STORAGE_ERROR_OK)
+    if (s_kv->get(to_save.key, stored_data.get(), actual_len, &got) != storage::StorageError::STORAGE_ERROR_OK)
       return true;
     return memcmp(to_save.data.data(), stored_data.get(), to_save.data.size()) != 0;
   }
@@ -441,7 +422,7 @@ ESP32Preferences *get_preferences() { return &s_preferences; }
 // external flash). All flash-backed preferences created AFTER this call read/write through the new
 // store; earlier ones keep their store. Called once the external store is initialised (storage
 // stage). RTC-backed preferences (in_flash=false) are unaffected.
-void set_external_preferences_store(storage::KeyValueStorage *kv) { s_external = kv; }
+void set_external_preferences_store(storage::KeyValueStorage *kv) { s_kv = kv; }
 #endif
 
 void setup_preferences() {

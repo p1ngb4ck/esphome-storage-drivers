@@ -46,7 +46,7 @@ template<typename... Ts> class MountCardAction : public Action<Ts...> {
  public:
   explicit MountCardAction(SdStorageBase *parent) : parent_(parent) {}
 
-  void play(Ts... x) override { this->parent_->start_mount_(); }
+  void play(Ts... x) override { this->parent_->log_mount_result_(this->parent_->mount()); }
 
  protected:
   SdStorageBase *parent_;

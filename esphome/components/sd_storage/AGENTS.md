@@ -15,9 +15,6 @@ An SD card as a `FilesystemStorage` + `MountableStorage` of the storage interfac
   core keeps running the scheduler meanwhile, so `esp_ldo.turn_off` / `delay` / `esp_ldo.turn_on` in an on_boot
   before priority 800 power-cycles the card without blocking. A failed first mount power-cycles the card once
   (`power_cycle_retry_()`: LDO off, `POWER_CYCLE_OFF_MS` by a scheduler timeout, on, mount again), held the same way.
-- `power_pin` (`SdMmc`, `USE_SD_STORAGE_POWER_PIN`): the GPIO of a switch in the card's supply. At `setup()` the card
-  goes off for `POWER_CYCLE_OFF_MS`, on, and mounts; a failed first mount cycles it once more, as `power_ldo` does.
-  `can_proceed()` holds the components after it.
 - `automation.h`: mount / unmount / list_files actions, `is_mounted` condition.
 
 Rules:

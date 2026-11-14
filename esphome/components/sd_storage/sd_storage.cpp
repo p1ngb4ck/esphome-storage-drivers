@@ -43,7 +43,6 @@ void SdMmc::setup() {
   if (this->cs_pin_ != nullptr) {
     this->cs_pin_->setup();
   }
-  this->mount_worker_ok_ = true;
 
   // Register before attempting to mount, not only on success -- get_info() reports is_mounted
   // correctly either way, and this lets the device (and its mount/unmount/list_files actions)
@@ -65,13 +64,6 @@ void SdMmc::setup() {
     this->mark_failed();
   }
 
-#ifdef USE_SD_STORAGE_POWER_PIN
-  if (this->power_pin_cycle_()) {
-    if (this->cd_pin_ != nullptr)
-      this->cd_pin_->setup();
-    return;
-  }
-#endif
 #ifdef USE_SD_STORAGE_POWER_LDO
   if (this->defer_mount_until_powered_()) {
     if (this->cd_pin_ != nullptr)
@@ -86,12 +78,20 @@ void SdMmc::setup() {
     // to mount" for a socket that's simply empty right now. No mark_failed() either way, same
     // rationale as above.
     if (this->card_present_()) {
-      this->start_mount_();
+      if (this->mount() != storage::StorageError::STORAGE_ERROR_OK) {
+        ESP_LOGE(TAG, "Failed to mount SD/MMC card");
+#ifdef USE_SD_STORAGE_POWER_LDO
+        this->power_cycle_retry_();
+#endif
+      }
     } else {
       ESP_LOGD(TAG, "Waiting for card (CD)");
     }
-  } else {
-    this->start_mount_();
+  } else if (this->mount() != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG, "Failed to mount SD/MMC card");
+#ifdef USE_SD_STORAGE_POWER_LDO
+    this->power_cycle_retry_();
+#endif
   }
 }
 
@@ -311,39 +311,19 @@ storage::StorageError SdMmc::mount() {
     return storage::StorageError::STORAGE_ERROR_NOT_READY;
   }
 
-#ifdef USE_SD_STORAGE_POWER_PIN
-  const bool standard_capacity =
-      !this->card_->is_mmc && !this->card_->is_sdio && (this->card_->ocr & SD_OCR_SDHC_CAP) == 0;
-  if (standard_capacity && this->power_pin_ != nullptr && this->power_tries_ < this->power_retries_) {
-    ESP_LOGW(TAG, "Card reports standard capacity, power-cycling it");
-    this->power_tries_++;
-    esp_vfs_fat_sdcard_unmount(this->mount_path_, this->card_);
-    this->card_ = nullptr;
-    if (this->mount_on_worker_) {
-      this->power_cycle_after_mount_ = true;
-    } else {
-      this->power_pin_off_on_();
-    }
-    return storage::StorageError::STORAGE_ERROR_NOT_READY;
-  }
-  if (!standard_capacity)
-    this->power_tries_ = 0;
-#endif
-
   if (this->card_->is_mmc) {
     this->card_type_ = CardType::CARD_TYPE_MMC;
   } else if (this->card_->is_sdio) {
     this->card_type_ = CardType::CARD_TYPE_SDIO;
   } else {
-    this->card_type_ = SdStorageBase::memory_card_type_((this->card_->ocr & SD_OCR_SDHC_CAP) != 0,
-                                                        (uint64_t) this->card_->csd.capacity * this->card_->csd.sector_size);
+    this->card_type_ = (this->card_->ocr & SD_OCR_SDHC_CAP) ? CardType::CARD_TYPE_SDHC : CardType::CARD_TYPE_SDSC;
   }
   this->block_size_ = this->card_->csd.sector_size;
   this->is_mounted_ = true;
 #ifdef USE_STORAGE_CHANGE_FEED
   // Mount state is part of the roots listing: whoever flipped it (CD pin, hotplug, HTTP,
   // automation), the browser's change poll must see it -- including recovery after an error.
-  if (storage::global_storage_registry != nullptr && !this->mount_on_worker_)
+  if (storage::global_storage_registry != nullptr)
     storage::global_storage_registry->note_dir_changed("");
 #endif
 
@@ -353,19 +333,24 @@ storage::StorageError SdMmc::mount() {
   this->set_fatfs_drive_(pdrv);
   this->update_card_info();
 
-  ESP_LOGI(TAG, "SD/MMC card mounted at %s: %s '%s', mfg 0x%02X, %.1f GB, %s, %d kHz (limit %" PRIu32 "), %d-bit",
-           this->mount_path_, SdStorageBase::card_type_to_string(this->card_type_), this->card_->cid.name,
-           static_cast<unsigned>(this->card_->cid.mfg_id),
-           static_cast<double>(this->card_->csd.capacity) * this->card_->csd.sector_size / 1e9,
-           this->card_->is_ddr             ? "DDR"
-           : this->card_->is_uhs1          ? "UHS-I"
-           : this->card_->real_freq_khz > SDMMC_FREQ_DEFAULT ? "high speed"
-                                                             : "default speed",
-           this->card_->real_freq_khz, static_cast<uint32_t>(this->card_->max_freq_khz),
-           1 << this->card_->log_bus_width);
+  ESP_LOGI(TAG, "SD/MMC card mounted at %s", this->mount_path_);
 
-  if (!this->mount_on_worker_)
-    this->publish_mount_();
+  if (storage::global_storage_registry != nullptr) {
+    if (storage::global_storage_registry->register_storage(this) != storage::StorageError::STORAGE_ERROR_OK) {
+      // Registry full = codegen/runtime device-count mismatch: the device would be invisible
+      // to resolve_path()/consumers. Fatal -- do not run with a silently missing device.
+      ESP_LOGE(TAG, "Storage registration failed");
+      this->mark_failed();
+    }
+  } else {
+    // Same contract as StorageWorker::setup(): the registry (BUS priority) is guaranteed to
+    // exist by the time this runs. Without it the device is invisible to resolve_path(), so
+    // every storage.* action would report "no storage mounted" with no diagnostic at all.
+    ESP_LOGE(TAG, "storage registry unavailable -- device cannot be registered");
+    this->mark_failed();
+  }
+
+  this->on_mounted_.call(this->mount_path_);
 
   return storage::StorageError::STORAGE_ERROR_OK;
 }

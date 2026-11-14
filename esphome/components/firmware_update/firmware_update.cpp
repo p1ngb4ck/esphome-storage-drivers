@@ -46,8 +46,9 @@ bool FirmwareUpdateComponent::is_running() const {
 
 std::string FirmwareUpdateComponent::installed_version() const {
 #ifdef USE_ESP32
-  const esp_partition_t *slot = esp_ota_get_running_partition();
-  if (slot == nullptr)
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const esp_partition_t *slot = esp_ota_get_next_update_partition(nullptr);
+  if (slot == nullptr || slot == running)
     return {};
   esp_app_desc_t desc{};
   if (esp_ota_get_partition_description(slot, &desc) != ESP_OK)

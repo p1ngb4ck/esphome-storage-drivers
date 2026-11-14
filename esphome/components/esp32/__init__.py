@@ -4178,49 +4178,6 @@ _EXFAT_PATCHES = (
     ("FF_USE_TRIM", "0"),
 )
 _EXFAT_MARKER = ".esphome_exfat_override"
-_REGISTRY_MARKER = ".esphome_registry_patch"
-
-
-def sync_registry_component(
-    namespace: str, name: str, version: str, patches: Iterable[tuple[str, str, str]]
-) -> str:
-    import hashlib
-    import io
-    import shutil
-    import zipfile
-
-    from esphome.external_files import compute_local_file_path, download_content
-
-    patches = tuple(patches)
-    url = (
-        f"https://components-file.espressif.com/components/{namespace}/{name}/{version}/"
-        f"{namespace}__{name}-v{version.replace('~', '_')}.zip"
-    )
-    stamp = hashlib.sha256(repr((url, patches)).encode()).hexdigest()
-    dest = Path(CORE.build_path) / "components-src" / f"{namespace}__{name}"
-    marker = dest / _REGISTRY_MARKER
-    if marker.is_file() and marker.read_text() == stamp:
-        return str(dest)
-    archive = download_content(url, compute_local_file_path("esp32", url))
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True)
-    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
-        zf.extractall(dest)
-    for rel, old, new in patches:
-        target = dest / rel
-        text = target.read_text(encoding="utf-8") if target.is_file() else ""
-        if text.count(old) != 1:
-            raise cv.Invalid(
-                f"{namespace}/{name} {version}: the patch of {rel} does not apply "
-                f"-- the text it replaces is missing or appears more than once"
-            )
-        target.write_text(text.replace(old, new, 1), encoding="utf-8")
-    marker.write_text(stamp)
-    return str(dest)
-
-
-CMAKE_MINIMUM_PATCH = ("cmake_minimum_required(VERSION 3.5)", "cmake_minimum_required(VERSION 3.5...3.10)")
 
 
 def _sync_exfat_fatfs_override(enabled: bool, idf_ver: str, variant: str) -> str | None:
@@ -4321,91 +4278,6 @@ def _sync_exfat_fatfs_override(enabled: bool, idf_ver: str, variant: str) -> str
     return str(dest)
 
 
-_SDMMC_MARKER = ".esphome_sdmmc_auto_stop"
-_SDMMC_TRANS = "src/sd_trans_sdmmc.c"
-_SDMMC_PATCHES = (
-    (
-        "    xSemaphoreTake(slot_ctx->ctlr->mutex, portMAX_DELAY);\n",
-        "    xSemaphoreTake(slot_ctx->ctlr->mutex, portMAX_DELAY);\n"
-        "    const bool auto_stop_wait = cmdinfo->data != NULL && cmd_needs_auto_stop(cmdinfo);\n",
-    ),
-    (
-        "    sd_host_handle_idle_state_events(slot_ctx);\n",
-        "    sd_host_handle_idle_state_events(slot_ctx);\n"
-        "    if (auto_stop_wait) {\n"
-        "        portENTER_CRITICAL(&slot_ctx->ctlr->spinlock);\n"
-        "        sdmmc_ll_clear_interrupt(slot_ctx->ctlr->hal.dev, SDMMC_LL_EVENT_ACD);\n"
-        "        sdmmc_ll_enable_interrupt(slot_ctx->ctlr->hal.dev, SDMMC_LL_EVENT_ACD, true);\n"
-        "        portEXIT_CRITICAL(&slot_ctx->ctlr->spinlock);\n"
-        "    }\n",
-    ),
-    (
-        "    slot_ctx->ctlr->is_app_cmd = (ret == ESP_OK && cmdinfo->opcode == MMC_APP_CMD);\n",
-        "    if (auto_stop_wait) {\n"
-        "        uint32_t stop_seen = unhandled_events.sdmmc_status;\n"
-        "        while (ret == ESP_OK && (stop_seen & SDMMC_LL_EVENT_ACD) == 0) {\n"
-        "            sd_host_sdmmc_event_t stop_evt = {};\n"
-        "            if (sd_host_wait_for_event(slot_ctx, cmdinfo->timeout_ms / portTICK_PERIOD_MS, &stop_evt) != ESP_OK) {\n"
-        "                ret = ESP_ERR_TIMEOUT;\n"
-        "                break;\n"
-        "            }\n"
-        "            stop_seen |= stop_evt.sdmmc_status;\n"
-        "        }\n"
-        "    }\n"
-        "    slot_ctx->ctlr->is_app_cmd = (ret == ESP_OK && cmdinfo->opcode == MMC_APP_CMD);\n",
-    ),
-    (
-        "out:\n#if CONFIG_PM_ENABLE\n",
-        "out:\n"
-        "    if (auto_stop_wait) {\n"
-        "        portENTER_CRITICAL(&slot_ctx->ctlr->spinlock);\n"
-        "        sdmmc_ll_enable_interrupt(slot_ctx->ctlr->hal.dev, SDMMC_LL_EVENT_ACD, false);\n"
-        "        portEXIT_CRITICAL(&slot_ctx->ctlr->spinlock);\n"
-        "    }\n"
-        "#if CONFIG_PM_ENABLE\n",
-    ),
-    (
-        '        ESP_LOGD(TAG, "%s: error 0x%x  (status=%08"PRIx32")", __func__, err, status);\n',
-        '        ESP_LOGE(TAG, "%s: error 0x%x  (status=%08"PRIx32")", __func__, err, status);\n',
-    ),
-    (
-        '        ESP_LOGD(TAG, "%s: error 0x%x (status=%08"PRIx32")", __func__, cmd->error, status);\n',
-        '        ESP_LOGE(TAG, "%s: error 0x%x (status=%08"PRIx32")", __func__, cmd->error, status);\n',
-    ),
-)
-
-
-def add_sdmmc_auto_stop_fix() -> None:
-    import shutil
-
-    from esphome.espidf.framework import _get_framework_path, check_esp_idf_install
-
-    idf_ver = str(CORE.data[KEY_ESP32][KEY_IDF_VERSION])
-    src = _get_framework_path(idf_ver) / "components" / "esp_driver_sdmmc"
-    if not src.is_dir():
-        check_esp_idf_install(idf_ver, targets=[get_esp32_variant()])
-    if not (src / _SDMMC_TRANS).is_file():
-        return
-    dest = Path(CORE.build_path) / "components-src" / "esp_driver_sdmmc"
-    marker = dest / _SDMMC_MARKER
-    stamp = f"v2:{idf_ver}"
-    if not (marker.is_file() and marker.read_text() == stamp):
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(src, dest)
-        trans = dest / _SDMMC_TRANS
-        text = trans.read_text()
-        for old, new in _SDMMC_PATCHES:
-            if text.count(old) != 1:
-                raise cv.Invalid(
-                    f"sd_storage: the SDMMC auto stop patch does not fit {_SDMMC_TRANS} of IDF {idf_ver}"
-                )
-            text = text.replace(old, new, 1)
-        trans.write_text(text)
-        marker.write_text(stamp)
-    add_idf_component(name="esp_driver_sdmmc", override_path=str(dest))
-
-
 @dataclass
 class PartitionEntry:
     name: str
@@ -4426,13 +4298,6 @@ EEPROM_SIZE = 0x1000  # Arduino only
 SPIFFS_SIZE = 0xF000  # Arduino only
 ARDUINO_NVS_SIZE = 0x60000
 IDF_NVS_SIZE = 0x70000
-IDF_NVS_SIZE_WITH_EXTERNAL = 0x5000
-
-
-def _idf_nvs_size() -> int:
-    if (CORE.config.get("preferences") or {}).get("external_nvs") is not None:
-        return IDF_NVS_SIZE_WITH_EXTERNAL
-    return IDF_NVS_SIZE
 
 
 def _get_partition_overhead() -> int:
@@ -4448,7 +4313,7 @@ def _get_partition_overhead() -> int:
     if CORE.using_arduino:
         overhead += EEPROM_SIZE + SPIFFS_SIZE + ARDUINO_NVS_SIZE
     else:
-        overhead += _idf_nvs_size()
+        overhead += IDF_NVS_SIZE
     return overhead
 
 
@@ -4570,7 +4435,7 @@ def get_partition_csv(flash_size_mb: str) -> str:
         )
     else:
         partitions.append(
-            PartitionEntry(name="nvs", type="data", subtype="nvs", size=_idf_nvs_size())
+            PartitionEntry(name="nvs", type="data", subtype="nvs", size=IDF_NVS_SIZE)
         )
     partitions.extend(CORE.data[KEY_ESP32].get(KEY_CUSTOM_PARTITIONS, {}).values())
 
