@@ -23,9 +23,10 @@ class NVSStore : public storage::KeyValueStorage {
  public:
   void setup() override;
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::DATA; }
+  float get_setup_priority() const override { return setup_priority::IO; }
 
   void set_partition_label(const char *label) { this->partition_label_ = label; }
+  const char *get_partition_label() const { return this->partition_label_; }
   void set_namespace(const char *ns) { this->namespace_ = ns; }
   void set_storage_id(const char *id) { this->storage_id_ = id; }
   void set_storage_name(const char *name) { this->storage_name_ = name; }
@@ -41,14 +42,18 @@ class NVSStore : public storage::KeyValueStorage {
   }
 
   storage::StorageError get_info(storage::StorageInfo *info) override;
+  uint8_t get_capabilities() const override { return storage::StorageCaps::STORAGE_CAP_IO_TASK_SAFE; }
 
   storage::StorageError get(uint32_t key, uint8_t *buf, size_t len, size_t *got) override;
   storage::StorageError set(uint32_t key, const uint8_t *data, size_t len) override;
+  storage::StorageError set_batch(const char *ns, const storage::KvItem *items, size_t count) override;
+  storage::StorageError get_batch(const char *ns, storage::KvRead *items, size_t count) override;
   storage::StorageError erase(uint32_t key) override;
   bool has(uint32_t key) override;
   storage::StorageError get_size(uint32_t key, size_t *out) override;
   storage::StorageError list_keys(bool (*callback)(uint32_t key, size_t size, void *ctx), void *ctx) override;
   storage::StorageError ensure_initialized() override;
+  bool is_initialized() const override { return this->initialized_; }
   storage::StorageError format() override;
 
  protected:
