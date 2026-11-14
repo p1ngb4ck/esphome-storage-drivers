@@ -307,6 +307,7 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
+  bool mount_settled() const override { return this->mounted_ || this->mount_state_ == MountState::FAILED; }
 
   //========================================================================
   // Configuration
@@ -337,10 +338,6 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
   // audio reader): CallLock takes them one at a time over the one socket and reply buffer.
   uint8_t get_capabilities() const override { return storage::STORAGE_CAP_IO_TASK_SAFE; }
 
-  // mount() requests one asynchronous mount attempt; loop() carries it out step by step
-  // (never blocking the caller). unmount() tears the mount down synchronously, following
-  // the SD-card safe-eject pattern: unregister (drains async worker traffic per the registry
-  // contract), UMNT + close, re-register as registered-but-unmounted.
   storage::StorageError mount() override;
   storage::StorageError unmount() override;
 
@@ -419,11 +416,12 @@ class NFSClient final : public storage::NetworkStorage, public storage::Mountabl
 
   MountState mount_state_{MountState::IDLE};
   uint32_t last_inline_mount_ms_{0};
-  // Runs the request-edge and one state-machine step (extracted from loop(), which still
-  // drives it every pass); ensure_mounted_() drives it to completion inline so every
-  // data-plane action is self-contained -- see the definition for the reasoning.
   void drive_mount_state_();
   bool ensure_mounted_();
+  void start_mount_();
+  storage::StorageError mount_blocking_();
+  std::atomic<bool> mount_on_worker_{false};
+  std::atomic<bool> mount_changed_{false};
   // Set by mount()/connect() or the auto-connect edge below; consumed by loop() to start one
   // mount attempt. No periodic retry exists anymore -- FAILED is terminal until the next
   // request (users schedule retries themselves via interval:/automations + storage.mount).

@@ -4,6 +4,9 @@
 #include "esphome/core/application.h"
 #include "esphome/components/network/util.h"
 #include "esphome/core/main_task.h"
+#ifdef USE_STORAGE_WORKER
+#include "esphome/components/storage/storage_worker.h"
+#endif
 
 #include <cerrno>
 #include <cstdlib>
@@ -404,36 +407,12 @@ void NFSClient::setup() {
 bool NFSClient::ensure_mounted_() {
   if (this->mounted_)
     return true;
-#ifdef USE_ESP32
-  // Mounting touches main-loop state (the change feed, the watchdog): another task gets
-  // NOT_READY until the main loop has mounted (auto-connect, an action, a listing).
-  if (xTaskGetCurrentTaskHandle() != esphome_main_task_handle)
-    return false;
-#endif
-  // Every file-api and browser action is self-contained: none may assume that some earlier
-  // action (a listing, a poll) has already brought the share up. So the action itself
-  // mounts, inline and synchronously -- the state machine's steps are all synchronous RPCs,
-  // loop() merely spreads them out; here they run back to back. Rate-limited so a dead
-  // server does not turn every knock into a fresh stack of RPC timeouts.
-  uint32_t now = millis();
-  if (now - this->last_inline_mount_ms_ < 3000)
-    return false;
-  this->last_inline_mount_ms_ = now;
-  ESP_LOGD(TAG, "Action against unmounted share -- mounting inline");
-  this->mount_requested_ = true;
-  const uint32_t deadline = now + 8000;  // hard cap; each RPC has its own shorter timeout
-  while (!this->mounted_ && millis() < deadline) {
-    MountState before = this->mount_state_;
-    this->drive_mount_state_();
-    if (this->mount_state_ == MountState::FAILED)
-      break;
-    if (this->mount_state_ == before && (before == MountState::IDLE || before == MountState::MOUNTED))
-      break;  // nothing left to drive
-    App.feed_wdt();
+  const uint32_t now = millis();
+  if (now - this->last_inline_mount_ms_ >= 3000) {
+    this->last_inline_mount_ms_ = now;
+    this->mount_requested_ = true;
   }
-  if (!this->mounted_)
-    ESP_LOGW(TAG, "Inline mount failed -- action answers NOT_READY");
-  return this->mounted_;
+  return false;
 }
 
 void NFSClient::loop() {
@@ -443,6 +422,10 @@ void NFSClient::loop() {
   // within one main-loop pass of the network coming up (event-edge, never periodic). The
   // first pass after boot counts as an edge when the network is already up by then, and a
   // network drop re-arms the edge so a reconnect remounts an unmounted share automatically.
+#ifdef USE_STORAGE_CHANGE_FEED
+  if (this->mount_changed_.exchange(false) && storage::global_storage_registry != nullptr)
+    storage::global_storage_registry->note_dir_changed("");
+#endif
   const bool net_connected = network::is_connected();
   if (this->auto_connect_ && net_connected && !this->network_was_connected_ && !this->mounted_) {
     ESP_LOGD(TAG, "Network up -- auto-connect requests NFS mount");
@@ -450,31 +433,44 @@ void NFSClient::loop() {
   }
   this->network_was_connected_ = net_connected;
 
-  // mount_state_ changes on the main loop only (here, ensure_mounted_(), unmount()).
-  const MountState state = this->mount_state_;
-  if (!this->mount_requested_ && (state == MountState::IDLE || state == MountState::FAILED))
+  if (!this->mount_requested_ || this->mount_on_worker_.load())
     return;
-  if (state == MountState::MOUNTED) {
-    this->mount_requested_ = false;
+  this->mount_requested_ = false;
+  if (this->mounted_ || !net_connected)
     return;
+  this->start_mount_();
+}
+
+void NFSClient::start_mount_() {
+  ESP_LOGD(TAG, "Starting NFS mount attempt for %s:%s", this->server_.c_str(), this->export_path_.c_str());
+#ifdef USE_STORAGE_WORKER
+  if (storage::global_storage_worker != nullptr) {
+    this->mount_on_worker_ = true;
+    const storage::StorageError submitted = storage::global_storage_worker->async_mount(
+        this, [this](storage::StorageError) { this->mount_on_worker_ = false; });
+    if (submitted == storage::StorageError::STORAGE_ERROR_OK)
+      return;
+    this->mount_on_worker_ = false;
   }
-  CallLock lock(this);
-  this->drive_mount_state_();
+#endif
+  this->mount_blocking_();
+}
+
+storage::StorageError NFSClient::mount_blocking_() {
+  this->mount_state_ = MountState::CONNECTING_PMAP;
+  while (this->mount_state_ != MountState::MOUNTED && this->mount_state_ != MountState::FAILED) {
+    CallLock lock(this);
+    this->drive_mount_state_();
+  }
+  return this->mount_state_ == MountState::MOUNTED ? storage::StorageError::STORAGE_ERROR_OK
+                                                   : storage::StorageError::STORAGE_ERROR_NOT_READY;
 }
 
 void NFSClient::drive_mount_state_() {
-  // A pending request only starts a new attempt from a resting state; FAILED is terminal
-  // otherwise (no periodic retry -- retries are the user's decision via interval:/automations
-  // calling storage.mount, the next network-up edge above, or an action mounting inline
-  // through ensure_mounted_()).
-  if (this->mount_requested_ && (this->mount_state_ == MountState::IDLE || this->mount_state_ == MountState::FAILED)) {
-    this->mount_requested_ = false;
-    ESP_LOGD(TAG, "Starting NFS mount attempt for %s:%s", this->server_.c_str(), this->export_path_.c_str());
-    this->mount_state_ = MountState::CONNECTING_PMAP;
-  }
-
   switch (this->mount_state_) {
     case MountState::IDLE:
+    case MountState::MOUNTED:
+    case MountState::FAILED:
       break;
 
     case MountState::CONNECTING_PMAP:
@@ -544,20 +540,11 @@ void NFSClient::drive_mount_state_() {
       this->close_connection_();
       this->finish_mount_();
       break;
-
-    case MountState::MOUNTED:
-      // A request that arrived mid-attempt has reached its target state -- drop it so it
-      // cannot restart the pipeline after a later manual unmount.
-      this->mount_requested_ = false;
-      break;
-
-    case MountState::FAILED:
-      break;
   }
 }
 
 void NFSClient::finish_mount_() {
-  this->mount_state_ = MountState::MOUNTED;  // from here connect_tcp_() reaches the NFS service
+  this->mount_state_ = MountState::MOUNTED;
   this->query_fsinfo_();
   this->set_mounted_(true);
 }
@@ -611,7 +598,6 @@ void NFSClient::dump_config() {
 //========================================================================
 
 storage::StorageError NFSClient::get_info(storage::StorageInfo *info) {
-  CallLock lock(this);
   if (info == nullptr) {
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   }
@@ -629,6 +615,7 @@ storage::StorageError NFSClient::get_info(storage::StorageInfo *info) {
   info->free_bytes = 0;
 
   if (this->mounted_) {
+    CallLock lock(this);
     uint64_t total = 0, free_b = 0;
     this->get_space_info(total, free_b);
     info->total_bytes = total;
@@ -641,8 +628,12 @@ storage::StorageError NFSClient::mount() {
   // Already mounted -> target state reached, no error.
   if (this->mounted_)
     return storage::StorageError::STORAGE_ERROR_OK;
-  // Request one asynchronous attempt; loop() runs the pipeline one step per pass. A request
-  // arriving while an attempt is already in flight simply coalesces with it.
+#ifdef USE_ESP32
+  if (xTaskGetCurrentTaskHandle() != esphome_main_task_handle)
+    return this->mount_blocking_();
+#endif
+  if (this->mount_on_worker_.load())
+    return this->mount_blocking_();
   this->mount_requested_ = true;
   return storage::StorageError::STORAGE_ERROR_OK;
 }
@@ -1302,12 +1293,7 @@ void NFSClient::set_mounted_(bool mounted) {
   if (this->mounted_ == mounted)
     return;  // no real change -- notify nobody
   this->mounted_ = mounted;
-#ifdef USE_STORAGE_CHANGE_FEED
-  // Mount state is part of the roots listing: whoever flipped it (mount action, auto-connect,
-  // network loss, unmount), the browser's change poll must see it.
-  if (storage::global_storage_registry != nullptr)
-    storage::global_storage_registry->note_dir_changed("");
-#endif
+  this->mount_changed_ = true;
 }
 
 void NFSClient::unmount_() {
