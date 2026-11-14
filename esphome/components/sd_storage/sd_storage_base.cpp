@@ -8,6 +8,9 @@
 #include <memory>
 #include "esphome/components/storage/fatfs_select.h"
 #include "esphome/components/storage/storage.h"
+#ifdef USE_STORAGE_WORKER
+#include "esphome/components/storage/storage_worker.h"
+#endif
 
 // FATFS_MAX_LFN is "depends on !FATFS_LFN_NONE" in the IDF's fatfs Kconfig, so with
 // CONFIG_FATFS_LFN_NONE=y -- a configuration the storage codegen explicitly supports --
@@ -51,6 +54,7 @@ StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool writing)
     case FR_WRITE_PROTECTED:
       return StorageError::STORAGE_ERROR_PERMISSION_DENIED;
     default:
+      ESP_LOGE(TAG_BASE, "FatFs result %d", static_cast<int>(res));
       return writing ? StorageError::STORAGE_ERROR_WRITE_ERROR : StorageError::STORAGE_ERROR_READ_ERROR;
   }
 }
@@ -170,10 +174,8 @@ void SdStorageBase::loop_cd_() {
 
   if (present) {
     ESP_LOGI(TAG_BASE, "Card inserted (CD edge)");
-    storage::StorageError result = this->mount();
-    this->log_mount_result_(result);
-    if (result == storage::StorageError::STORAGE_ERROR_OK)
-      this->on_inserted_.call();
+    this->mount_from_cd_ = true;
+    this->start_mount_();
   } else if (this->is_mounted_) {
     ESP_LOGI(TAG_BASE, "Card removed (CD edge)");
     this->log_unmount_(this->unmount());
@@ -186,15 +188,8 @@ bool SdStorageBase::defer_mount_until_powered_() {
   if (this->power_ldo_ == nullptr)
     return false;
   this->power_ldo_->add_on_turn_on_callback([this]() {
-    if (!this->mount_deferred_)
-      return;
-    this->mount_deferred_ = false;
-    if (!this->card_present_())
-      return;
-    storage::StorageError result = this->mount();
-    this->log_mount_result_(result);
-    if (result != storage::StorageError::STORAGE_ERROR_OK)
-      this->power_cycle_retry_();
+    if (this->mount_deferred_)
+      this->mount_after_settle_();
   });
   if (this->power_ldo_->is_on())
     return false;
@@ -202,23 +197,124 @@ bool SdStorageBase::defer_mount_until_powered_() {
   this->mount_deferred_ = true;
   return true;
 }
+#endif
+
+#ifdef USE_SD_STORAGE_POWER_PIN
+bool SdStorageBase::power_pin_cycle_() {
+  if (this->power_pin_ == nullptr)
+    return false;
+  this->power_pin_->setup();
+  if (!this->power_at_boot_) {
+    this->power_pin_->digital_write(true);
+    return false;
+  }
+  this->power_pin_off_on_();
+  return true;
+}
+
+void SdStorageBase::power_pin_off_on_() {
+  this->power_pin_->digital_write(false);
+  this->mount_deferred_ = true;
+  this->set_timeout(this->power_off_ms_, [this]() {
+    this->power_pin_->digital_write(true);
+    this->mount_after_settle_();
+  });
+}
+#endif
+
+#if defined(USE_SD_STORAGE_POWER_LDO) || defined(USE_SD_STORAGE_POWER_PIN)
+void SdStorageBase::mount_after_settle_() {
+  const auto mount_now = [this]() {
+    this->mount_deferred_ = false;
+    if (!this->card_present_())
+      return;
+    this->start_mount_();
+  };
+  if (this->power_settle_ms_ == 0) {
+    mount_now();
+  } else {
+    this->set_timeout(this->power_settle_ms_, mount_now);
+  }
+}
 
 void SdStorageBase::power_cycle_retry_() {
-  if (this->power_ldo_ == nullptr || this->power_retried_)
+  if (this->power_tries_ >= this->power_retries_)
     return;
-  this->power_retried_ = true;
-  ESP_LOGW(TAG_BASE, "Mount failed, power-cycling the card once");
+  this->power_tries_++;
+  ESP_LOGW(TAG_BASE, "Mount failed, power-cycling the card");
+#ifdef USE_SD_STORAGE_POWER_PIN
+  if (this->power_pin_ != nullptr) {
+    this->power_pin_off_on_();
+    return;
+  }
+#endif
+#ifdef USE_SD_STORAGE_POWER_LDO
+  if (this->power_ldo_ == nullptr)
+    return;
   this->power_ldo_->turn_off();
   if (this->power_ldo_->is_on())
     return;
   this->mount_deferred_ = true;
-  this->set_timeout(POWER_CYCLE_OFF_MS, [this]() {
+  this->set_timeout(this->power_off_ms_, [this]() {
     this->power_ldo_->turn_on();
     if (!this->power_ldo_->is_on())
       this->mount_deferred_ = false;
   });
+#endif
 }
 #endif
+
+void SdStorageBase::start_mount_() {
+  if (this->mount_on_worker_ || this->is_mounted_)
+    return;
+#ifdef USE_STORAGE_WORKER
+  if (this->mount_worker_ok_ && storage::global_storage_worker != nullptr) {
+    this->mount_on_worker_ = true;
+    const storage::StorageError submitted =
+        storage::global_storage_worker->async_mount(this, [this](storage::StorageError result) {
+          this->mount_on_worker_ = false;
+          if (result == storage::StorageError::STORAGE_ERROR_OK)
+            this->publish_mount_();
+          this->mount_finished_(result);
+        });
+    if (submitted == storage::StorageError::STORAGE_ERROR_OK)
+      return;
+    this->mount_on_worker_ = false;
+  }
+#endif
+  this->mount_finished_(this->mount());
+}
+
+void SdStorageBase::publish_mount_() {
+  if (storage::global_storage_registry == nullptr ||
+      storage::global_storage_registry->register_storage(this) != storage::StorageError::STORAGE_ERROR_OK) {
+    ESP_LOGE(TAG_BASE, "Storage registration failed");
+    this->mark_failed();
+  }
+  this->on_mounted_.call(this->mount_path_);
+}
+
+void SdStorageBase::mount_finished_(storage::StorageError result) {
+  const bool from_cd = this->mount_from_cd_;
+  this->mount_from_cd_ = false;
+  this->log_mount_result_(result);
+#ifdef USE_SD_STORAGE_POWER_PIN
+  if (this->power_cycle_after_mount_) {
+    this->power_cycle_after_mount_ = false;
+    this->power_pin_off_on_();
+    return;
+  }
+#endif
+  if (result == storage::StorageError::STORAGE_ERROR_OK) {
+    if (from_cd)
+      this->on_inserted_.call();
+    return;
+  }
+#if defined(USE_SD_STORAGE_POWER_LDO) || defined(USE_SD_STORAGE_POWER_PIN)
+  if (!this->is_mounted() && !this->mount_deferred_)
+    this->power_cycle_retry_();
+#endif
+}
 
 bool SdStorageBase::card_present_() {
   if (this->cd_pin_ == nullptr)
@@ -270,7 +366,14 @@ storage::StorageError SdStorageBase::sync() {
   SdFileHandle *pool = this->get_handle_pool();
   storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   for (int i = 0; i < MAX_OPEN_FILES; i++) {
-    if (!pool[i].in_use || pool[i].file == nullptr)
+    if (!pool[i].in_use)
+      continue;
+    if (pool[i].use_fatfs) {
+      if (pool[i].fatfs_write && f_sync(&pool[i].fil) != FR_OK)
+        err = storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
+      continue;
+    }
+    if (pool[i].file == nullptr)
       continue;
     if (fflush(pool[i].file) != 0 || fsync(fileno(pool[i].file)) != 0)
       err = storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
@@ -287,8 +390,10 @@ storage::StorageError SdStorageBase::flush_open_handles_() {
     if (pool[i].use_fatfs) {
       ESP_LOGW(TAG_BASE, "File still open at unmount, closing: %s", pool[i].path);
       if (f_close(&pool[i].fil) != FR_OK)
-        err = storage::StorageError::STORAGE_ERROR_READ_ERROR;
+        err = pool[i].fatfs_write ? storage::StorageError::STORAGE_ERROR_WRITE_ERROR
+                                  : storage::StorageError::STORAGE_ERROR_READ_ERROR;
       pool[i].use_fatfs = false;
+      pool[i].fatfs_write = false;
     } else if (pool[i].file != nullptr) {
       ESP_LOGW(TAG_BASE, "File still open at unmount, flushing and closing: %s", pool[i].path);
       if (fflush(pool[i].file) != 0 || fsync(fileno(pool[i].file)) != 0)
@@ -333,6 +438,7 @@ storage::StorageError SdStorageBase::open(const char *path, storage::FileHandle 
     if (this->build_fatfs_path_(path, fatfs_path, sizeof(fatfs_path)) &&
         f_open(&h->fil, fatfs_path, FA_READ | FA_OPEN_EXISTING) == FR_OK) {
       h->use_fatfs = true;
+      h->fatfs_write = false;
       h->in_use = true;
       h->path = h->path_buf;
       h->storage = this;
@@ -340,6 +446,26 @@ storage::StorageError SdStorageBase::open(const char *path, storage::FileHandle 
       handle = h;
       return storage::StorageError::STORAGE_ERROR_OK;
     }
+  }
+
+  if (mode == storage::OpenMode::OPEN_MODE_WRITE &&
+      (this->get_capabilities() & storage::StorageCaps::STORAGE_CAP_DMA_STREAM) != 0) {
+    char fatfs_path[(ESP_VFS_PATH_MAX + CONFIG_FATFS_MAX_LFN + 1)];
+    if (!this->build_fatfs_path_(path, fatfs_path, sizeof(fatfs_path)))
+      return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
+    const FRESULT res = f_open(&h->fil, fatfs_path, FA_WRITE | FA_CREATE_ALWAYS);
+    if (res != FR_OK) {
+      ESP_LOGE(TAG_BASE, "f_open %s: FatFs result %d", fatfs_path, static_cast<int>(res));
+      return fresult_to_storage_error(res, false, true);
+    }
+    h->use_fatfs = true;
+    h->fatfs_write = true;
+    h->in_use = true;
+    h->path = h->path_buf;
+    h->storage = this;
+    h->file = nullptr;
+    handle = h;
+    return storage::StorageError::STORAGE_ERROR_OK;
   }
 
   const char *fmode = nullptr;
@@ -360,6 +486,11 @@ storage::StorageError SdStorageBase::open(const char *path, storage::FileHandle 
 
   FILE *f = fopen(h->path_buf, fmode);
   if (f == nullptr) {
+    if (errno == ENOENT) {
+      ESP_LOGD(TAG_BASE, "fopen %s: not there", h->path_buf);
+    } else {
+      ESP_LOGE(TAG_BASE, "fopen %s: errno %d", h->path_buf, errno);
+    }
     return storage::error_from_errno(errno, mode != storage::OpenMode::OPEN_MODE_READ);
   }
 
@@ -378,16 +509,22 @@ storage::StorageError SdStorageBase::close(storage::FileHandle *handle) {
   auto *h = static_cast<SdFileHandle *>(handle);
   storage::StorageError err = storage::StorageError::STORAGE_ERROR_OK;
   if (h->use_fatfs) {
-    // FatFs read handle (opened read-only): no dirty data to flush, so a close failure is a read-side
-    // fault, not a truncation.
-    if (f_close(&h->fil) != FR_OK)
+    const FRESULT res = f_close(&h->fil);
+    if (res != FR_OK && h->fatfs_write) {
+      ESP_LOGE(TAG_BASE, "f_close: FatFs result %d", static_cast<int>(res));
+      err = storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
+    } else if (res != FR_OK) {
       err = storage::StorageError::STORAGE_ERROR_READ_ERROR;
+    }
     h->use_fatfs = false;
+    h->fatfs_write = false;
   } else if (h->file != nullptr) {
     // FATFS flushes on close (see the dst-close-error propagation in storage.cpp's copy()) --
     // a failed close here can mean a silently truncated/corrupt file.
-    if (fclose(h->file) != 0)
+    if (fclose(h->file) != 0) {
+      ESP_LOGE(TAG_BASE, "fclose: errno %d", errno);
       err = storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
+    }
     h->file = nullptr;
   }
   h->in_use = false;
@@ -437,11 +574,30 @@ storage::StorageError SdStorageBase::read_dma(storage::FileHandle *handle, uint8
 
 storage::StorageError SdStorageBase::write(storage::FileHandle *handle, const uint8_t *buf, size_t len,
                                            size_t *bytes_transferred) {
-  if (handle == nullptr || !handle->in_use || handle->file == nullptr)
+  if (handle == nullptr || !handle->in_use)
+    return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
+  auto *h = static_cast<SdFileHandle *>(handle);
+  if (h->use_fatfs) {
+    if (!h->fatfs_write)
+      return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
+    UINT bw = 0;
+    const FRESULT res = f_write(&h->fil, buf, static_cast<UINT>(len), &bw);
+    if (bytes_transferred != nullptr)
+      *bytes_transferred = bw;
+    if (res != FR_OK || bw != len) {
+      ESP_LOGE(TAG_BASE, "f_write %u of %u: FatFs result %d", static_cast<unsigned>(bw), static_cast<unsigned>(len),
+               static_cast<int>(res));
+      return res != FR_OK ? fresult_to_storage_error(res, false, true) : storage::StorageError::STORAGE_ERROR_NO_SPACE;
+    }
+    return storage::StorageError::STORAGE_ERROR_OK;
+  }
+  if (handle->file == nullptr)
     return storage::StorageError::STORAGE_ERROR_INVALID_ARGS;
   size_t n = fwrite(buf, 1, len, handle->file);
   if (bytes_transferred != nullptr)
     *bytes_transferred = n;
+  if (n != len)
+    ESP_LOGE(TAG_BASE, "fwrite %u of %u: errno %d", static_cast<unsigned>(n), static_cast<unsigned>(len), errno);
   return (n == len) ? storage::StorageError::STORAGE_ERROR_OK : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
 }
 
@@ -685,8 +841,10 @@ storage::StorageError SdStorageBase::rename(const char *old_path, const char *ne
   // Report why it failed: FatFs refuses an existing destination (FR_EXIST -> EEXIST), and a
   // caller that cannot tell that apart from an I/O error cannot offer to overwrite.
   errno = 0;
-  if (::rename(full_old, full_new) != 0)
+  if (::rename(full_old, full_new) != 0) {
+    ESP_LOGE(TAG_BASE, "rename %s: errno %d", full_old, errno);
     return storage::error_from_errno(errno, true);
+  }
   return storage::StorageError::STORAGE_ERROR_OK;
 }
 
@@ -730,13 +888,22 @@ const char *SdStorageBase::card_type_to_string(CardType type) {
     case CardType::CARD_TYPE_MMC:
       return "MMC";
     case CardType::CARD_TYPE_SDHC:
-      return "SDHC/SDXC";
+      return "SDHC";
+    case CardType::CARD_TYPE_SDXC:
+      return "SDXC";
     case CardType::CARD_TYPE_SDSC:
       return "SDSC";
     case CardType::CARD_TYPE_UNKNOWN:
     default:
       return "UNKNOWN";
   }
+}
+
+CardType SdStorageBase::memory_card_type_(bool high_capacity, uint64_t total_bytes) {
+  static constexpr uint64_t SDHC_MAX_BYTES = 32ULL * 1024 * 1024 * 1024;
+  if (!high_capacity)
+    return CardType::CARD_TYPE_SDSC;
+  return total_bytes > SDHC_MAX_BYTES ? CardType::CARD_TYPE_SDXC : CardType::CARD_TYPE_SDHC;
 }
 
 }  // namespace esphome::sd_storage

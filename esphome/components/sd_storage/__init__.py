@@ -79,6 +79,12 @@ CONF_FORMAT_ON_MISMATCH = "format_on_mismatch"
 CONF_SPI_INTERFACE = "spi_interface"
 CONF_ASSUME_EXCLUSIVE_BUS = "assume_exclusive_bus"
 CONF_POWER_LDO = "power_ldo"
+CONF_POWER_PIN = "power_pin"
+CONF_POWER_CYCLE = "power_cycle"
+CONF_AT_BOOT = "at_boot"
+CONF_OFF_TIME = "off_time"
+CONF_SETTLE_TIME = "settle_time"
+CONF_RETRIES = "retries"
 
 TYPE_SD_MMC = "sd_mmc"
 TYPE_SD_SPI = "sd_spi"
@@ -157,6 +163,15 @@ SD_MMC_SCHEMA = cv.Schema(
         cv.Optional(CONF_CD_PIN): pins.gpio_input_pullup_pin_schema,
         cv.Optional(CONF_FORMAT_ON_MISMATCH, default=False): cv.boolean,
         cv.Optional(CONF_POWER_LDO): cv.use_id(EspLdo),
+        cv.Optional(CONF_POWER_PIN): pins.gpio_output_pin_schema,
+        cv.Optional(CONF_POWER_CYCLE, default={}): cv.Schema(
+            {
+                cv.Optional(CONF_AT_BOOT, default=True): cv.boolean,
+                cv.Optional(CONF_OFF_TIME, default="300ms"): cv.positive_time_period_milliseconds,
+                cv.Optional(CONF_SETTLE_TIME, default="0ms"): cv.positive_time_period_milliseconds,
+                cv.Optional(CONF_RETRIES, default=1): cv.int_range(min=0, max=5),
+            }
+        ),
         cv.Optional(CONF_ON_MOUNTED): automation.validate_automation(
             {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(CardMountedTrigger)}
         ),
@@ -383,6 +398,7 @@ async def to_code(config):
 
     elif card_type == TYPE_SD_MMC:
         cg.add_define("USE_SD_STORAGE_SDMMC")
+        esp32.add_sdmmc_auto_stop_fix()
 
         mode_1bit = config.get(CONF_MODE_1BIT, False)
         cg.add(var.set_mode_1bit(mode_1bit))
@@ -415,6 +431,19 @@ async def to_code(config):
         if power_ldo := config.get(CONF_POWER_LDO):
             cg.add_define("USE_SD_STORAGE_POWER_LDO")
             cg.add(var.set_power_ldo(await cg.get_variable(power_ldo)))
+        if power_pin := config.get(CONF_POWER_PIN):
+            cg.add_define("USE_SD_STORAGE_POWER_PIN")
+            cg.add(var.set_power_pin(await cg.gpio_pin_expression(power_pin)))
+        if CONF_POWER_LDO in config or CONF_POWER_PIN in config:
+            cycle = config[CONF_POWER_CYCLE]
+            cg.add(
+                var.set_power_cycle(
+                    cycle[CONF_AT_BOOT],
+                    cycle[CONF_OFF_TIME].total_milliseconds,
+                    cycle[CONF_SETTLE_TIME].total_milliseconds,
+                    cycle[CONF_RETRIES],
+                )
+            )
 
     cg.add(var.set_mount_path(config[CONF_MOUNT_PATH]))
     # Full VFS paths carry the mount point; the storage component sizes its buffers from the

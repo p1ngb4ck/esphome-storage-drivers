@@ -21,16 +21,13 @@ namespace esphome::sd_storage {
 // vs READ_ERROR for the generic default.
 storage::StorageError fresult_to_storage_error(FRESULT res, bool for_rmdir, bool writing);
 
-// Note: SDHC and SDXC cards cannot be distinguished by the OCR capacity bit alone (that only
-// separates SDSC from "high/extended capacity"); doing so would require checking the card's
-// actual reported capacity. No driver currently assigns SDXC, so it's omitted here rather than
-// kept as a value nothing ever produces.
 enum class CardType : uint8_t {
   CARD_TYPE_UNKNOWN = 0,
   CARD_TYPE_SDIO = 1,
   CARD_TYPE_MMC = 2,
   CARD_TYPE_SDHC = 3,
   CARD_TYPE_SDSC = 4,
+  CARD_TYPE_SDXC = 5,
 };
 
 struct SdFileHandle : public storage::FileHandle {
@@ -42,6 +39,7 @@ struct SdFileHandle : public storage::FileHandle {
   // every handle on a driver without the cap, keep the stdio path.
   FIL fil{};
   bool use_fatfs{false};
+  bool fatfs_write{false};
 };
 
 template<typename... Ts> class MountCardAction;
@@ -62,9 +60,25 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   void set_requested_file_system(uint8_t fs) { this->requested_file_system_ = fs; }
 #endif
   bool is_mounted() const { return this->is_mounted_; }
+  bool removable_media() const override { return true; }
 #ifdef USE_SD_STORAGE_POWER_LDO
   void set_power_ldo(esp_ldo::EspLdo *ldo) { this->power_ldo_ = ldo; }
-  bool can_proceed() override { return !this->mount_deferred_; }
+#endif
+#ifdef USE_SD_STORAGE_POWER_PIN
+  void set_power_pin(GPIOPin *pin) { this->power_pin_ = pin; }
+#endif
+#if defined(USE_SD_STORAGE_POWER_LDO) || defined(USE_SD_STORAGE_POWER_PIN)
+  void set_power_cycle(bool at_boot, uint32_t off_ms, uint32_t settle_ms, uint8_t retries) {
+    this->power_at_boot_ = at_boot;
+    this->power_off_ms_ = off_ms;
+    this->power_settle_ms_ = settle_ms;
+    this->power_retries_ = retries;
+  }
+  bool can_proceed() override { return !this->mount_deferred_ && !this->mount_on_worker_; }
+  bool mount_settled() const override { return this->is_ready() && !this->mount_deferred_ && !this->mount_on_worker_; }
+#else
+  bool can_proceed() override { return !this->mount_on_worker_; }
+  bool mount_settled() const override { return this->is_ready() && !this->mount_on_worker_; }
 #endif
   // No-RTTI downcast hook -- see PathStorage::as_mountable().
   storage::MountableStorage *as_mountable() override { return this; }
@@ -166,6 +180,13 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   // runs. card_present_() itself must still be called every iteration regardless (see above).
   bool should_poll_cd_();
 
+  void start_mount_();
+  void mount_finished_(storage::StorageError result);
+  void publish_mount_();
+  bool mount_worker_ok_{false};
+  bool mount_on_worker_{false};
+  bool mount_from_cd_{false};
+
   // Friended so automation.h's action templates (separate classes) can call the protected
   // logging helpers below without making them part of the public interface.
   template<typename... Ts> friend class MountCardAction;
@@ -173,12 +194,24 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   template<typename... Ts> friend class ListFilesAction;
 
 #ifdef USE_SD_STORAGE_POWER_LDO
-  static constexpr uint32_t POWER_CYCLE_OFF_MS = 150;
   bool defer_mount_until_powered_();
-  void power_cycle_retry_();
   esp_ldo::EspLdo *power_ldo_{nullptr};
+#endif
+#ifdef USE_SD_STORAGE_POWER_PIN
+  bool power_pin_cycle_();
+  void power_pin_off_on_();
+  GPIOPin *power_pin_{nullptr};
+  bool power_cycle_after_mount_{false};
+#endif
+#if defined(USE_SD_STORAGE_POWER_LDO) || defined(USE_SD_STORAGE_POWER_PIN)
+  void power_cycle_retry_();
+  void mount_after_settle_();
+  uint32_t power_off_ms_{300};
+  uint32_t power_settle_ms_{0};
+  uint8_t power_retries_{1};
+  uint8_t power_tries_{0};
+  bool power_at_boot_{true};
   bool mount_deferred_{false};
-  bool power_retried_{false};
 #endif
 
   void log_mount_result_(storage::StorageError err) const;
@@ -188,6 +221,7 @@ class SdStorageBase : public storage::FilesystemStorage, public storage::Mountab
   // Matches the list_dir() callback signature (bool return = keep enumerating).
   static bool log_list_dir_entry(const storage::FileStat *entry, void *ctx);
   static const char *card_type_to_string(CardType type);
+  static CardType memory_card_type_(bool high_capacity, uint64_t total_bytes);
 
   CardType card_type_{CardType::CARD_TYPE_UNKNOWN};
   bool is_mounted_{false};

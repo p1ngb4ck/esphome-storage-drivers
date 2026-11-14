@@ -101,6 +101,9 @@ class I2SAudioMicrophone final : public I2SAudioIn, public microphone::Microphon
 #endif
 
   bool pdm_{false};
+#ifdef USE_I2S_AUDIO_NVS
+  bool nvs_inactive_{false};
+#endif
   bool correct_dc_offset_;
   bool locked_driver_{false};
   DCOffsetFilter dc_offset_filter_;
