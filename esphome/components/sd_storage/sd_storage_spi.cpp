@@ -306,8 +306,7 @@ StorageError SdSpi::mount() {
   } else if (this->card_->is_sdio) {
     this->card_type_ = CardType::CARD_TYPE_SDIO;
   } else {
-    this->card_type_ = SdStorageBase::memory_card_type_((this->card_->ocr & SD_OCR_SDHC_CAP) != 0,
-                                                        (uint64_t) this->card_->csd.capacity * this->card_->csd.sector_size);
+    this->card_type_ = (this->card_->ocr & SD_OCR_SDHC_CAP) ? CardType::CARD_TYPE_SDHC : CardType::CARD_TYPE_SDSC;
   }
 
   this->is_mounted_ = true;

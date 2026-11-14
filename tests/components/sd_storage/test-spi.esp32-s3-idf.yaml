@@ -1,3 +1,0 @@
-packages:
-  spi: !include ../../test_build_components/common/spi/esp32-s3-idf.yaml
-  sd_storage: !include common-spi.yaml
