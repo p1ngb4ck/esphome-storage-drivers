@@ -110,62 +110,6 @@ storage::StorageError NVSStore::set(uint32_t key, const uint8_t *data, size_t le
   return err == ESP_OK ? storage::StorageError::STORAGE_ERROR_OK : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
 }
 
-storage::StorageError NVSStore::set_batch(const char *ns, const storage::KvItem *items, size_t count) {
-  if (!this->initialized_ && this->ensure_initialized() != storage::StorageError::STORAGE_ERROR_OK)
-    return storage::StorageError::STORAGE_ERROR_NOT_READY;
-  nvs_handle_t handle = 0;
-  esp_err_t err = this->partition_label_ != nullptr
-                      ? nvs_open_from_partition(this->partition_label_, ns, NVS_READWRITE, &handle)
-                      : nvs_open(ns, NVS_READWRITE, &handle);
-  if (err != ESP_OK)
-    return storage::StorageError::STORAGE_ERROR_NOT_READY;
-  bool changed = false;
-  for (size_t i = 0; i < count && err == ESP_OK; i++) {
-    if (items[i].key == nullptr)
-      continue;
-    err = items[i].value != nullptr ? nvs_set_str(handle, items[i].key, items[i].value)
-                                    : nvs_erase_key(handle, items[i].key);
-    if (items[i].value == nullptr && err == ESP_ERR_NVS_NOT_FOUND)
-      err = ESP_OK;
-    else if (err == ESP_OK)
-      changed = true;
-  }
-  if (err == ESP_OK && changed)
-    err = nvs_commit(handle);
-  nvs_close(handle);
-  return err == ESP_OK ? storage::StorageError::STORAGE_ERROR_OK : storage::StorageError::STORAGE_ERROR_WRITE_ERROR;
-}
-
-storage::StorageError NVSStore::get_batch(const char *ns, storage::KvRead *items, size_t count) {
-  for (size_t i = 0; i < count; i++) {
-    items[i].len = 0;
-    if (items[i].out != nullptr && items[i].cap > 0)
-      items[i].out[0] = '\0';
-  }
-  if (!this->initialized_ && this->ensure_initialized() != storage::StorageError::STORAGE_ERROR_OK)
-    return storage::StorageError::STORAGE_ERROR_NOT_READY;
-  nvs_handle_t handle = 0;
-  esp_err_t err = this->partition_label_ != nullptr
-                      ? nvs_open_from_partition(this->partition_label_, ns, NVS_READONLY, &handle)
-                      : nvs_open(ns, NVS_READONLY, &handle);
-  if (err == ESP_ERR_NVS_NOT_FOUND)
-    return storage::StorageError::STORAGE_ERROR_OK;
-  if (err != ESP_OK)
-    return storage::StorageError::STORAGE_ERROR_NOT_READY;
-  for (size_t i = 0; i < count; i++) {
-    if (items[i].key == nullptr || items[i].out == nullptr || items[i].cap == 0)
-      continue;
-    size_t len = items[i].cap;
-    if (nvs_get_str(handle, items[i].key, items[i].out, &len) == ESP_OK && len > 0) {
-      items[i].len = len - 1;
-    } else {
-      items[i].out[0] = '\0';
-    }
-  }
-  nvs_close(handle);
-  return storage::StorageError::STORAGE_ERROR_OK;
-}
-
 storage::StorageError NVSStore::erase(uint32_t key) {
   if (!this->open_())
     return storage::StorageError::STORAGE_ERROR_NOT_READY;
